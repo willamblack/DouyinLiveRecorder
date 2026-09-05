@@ -4,14 +4,16 @@
 Author: Hmily
 GitHub: https://github.com/ihmily
 Date: 2023-07-15 23:15:00
-Update: 2025-02-08 17:59:16
+Update: 2025-10-23 18:28:00
 Copyright (c) 2023-2025 by Hmily, All Rights Reserved.
 Function: Get live stream data.
 """
 
 import hashlib
 import random
+import subprocess
 import time
+import uuid
 from operator import itemgetter
 import urllib.parse
 import urllib.error
@@ -23,10 +25,11 @@ import json
 import execjs
 import urllib.request
 from . import JS_SCRIPT_PATH, utils
-from .utils import trace_error_decorator
+from .utils import trace_error_decorator, generate_random_string
 from .logger import script_path
-from .room import get_sec_user_id, get_unique_id
+from .room import get_sec_user_id, get_unique_id, UnsupportedUrlError
 from .http_clients.async_http import async_req
+from .ab_sign import ab_sign
 
 
 ssl_context = ssl.create_default_context()
@@ -62,10 +65,87 @@ async def get_play_url_list(m3u8: str, proxy: OptionalStr = None, header: Option
     return play_url_list
 
 
+async def get_douyin_web_stream_data(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None):
+    headers = {
+        'cookie': 'ttwid=1%7C2iDIYVmjzMcpZ20fcaFde0VghXAA3NaNXE_SLR68IyE%7C1761045455'
+                  '%7Cab35197d5cfb21df6cbb2fa7ef1c9262206b062c315b9d04da746d0b37dfbc7d',
+        'referer': 'https://live.douyin.com/335354047186',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/116.0.5845.97 Safari/537.36 Core/1.116.567.400 QQBrowser/19.7.6764.400',
+    }
+    if cookies:
+        headers['cookie'] = cookies
+
+    try:
+        web_rid = url.split('?')[0].split('live.douyin.com/')[-1]
+        params = {
+            "aid": "6383",
+            "app_name": "douyin_web",
+            "live_id": "1",
+            "device_platform": "web",
+            "language": "zh-CN",
+            "browser_language": "zh-CN",
+            "browser_platform": "Win32",
+            "browser_name": "Chrome",
+            "browser_version": "116.0.0.0",
+            "web_rid": web_rid,
+            'msToken': '',
+        }
+
+        api = f'https://live.douyin.com/webcast/room/web/enter/?{urllib.parse.urlencode(params)}'
+        a_bogus = ab_sign(urllib.parse.urlparse(api).query, headers['user-agent'])
+        api += "&a_bogus=" + a_bogus
+        try:
+            json_str = await async_req(url=api, proxy_addr=proxy_addr, headers=headers)
+            if not json_str:
+                raise Exception("it triggered risk control")
+            json_data = json.loads(json_str)['data']
+            if not json_data['data']:
+                raise Exception(f"{url} VR live is not supported")
+            room_data = json_data['data'][0]
+            room_data['anchor_name'] = json_data['user']['nickname']
+        except Exception as e:
+            raise Exception(f"Douyin web data fetch error, because {e}.")
+
+        if room_data['status'] == 2:
+            if 'stream_url' not in room_data:
+                raise RuntimeError(
+                    "The live streaming type or gameplay is not supported on the computer side yet, please use the "
+                    "app to share the link for recording."
+                )
+            live_core_sdk_data = room_data['stream_url']['live_core_sdk_data']
+            pull_datas = room_data['stream_url']['pull_datas']
+            if live_core_sdk_data:
+                if pull_datas:
+                    key = list(pull_datas.keys())[0]
+                    json_str = pull_datas[key]['stream_data']
+                else:
+                    json_str = live_core_sdk_data['pull_data']['stream_data']
+                json_data = json.loads(json_str)
+                if 'origin' in json_data['data']:
+                    stream_data = live_core_sdk_data['pull_data']['stream_data']
+                    origin_data = json.loads(stream_data)['data']['origin']['main']
+                    sdk_params = json.loads(origin_data['sdk_params'])
+                    origin_hls_codec = sdk_params.get('VCodec') or ''
+
+                    origin_url_list = json_data['data']['origin']['main']
+                    origin_m3u8 = {'ORIGIN': origin_url_list["hls"] + '&codec=' + origin_hls_codec}
+                    origin_flv = {'ORIGIN': origin_url_list["flv"] + '&codec=' + origin_hls_codec}
+                    hls_pull_url_map = room_data['stream_url']['hls_pull_url_map']
+                    flv_pull_url = room_data['stream_url']['flv_pull_url']
+                    room_data['stream_url']['hls_pull_url_map'] = {**origin_m3u8, **hls_pull_url_map}
+                    room_data['stream_url']['flv_pull_url'] = {**origin_flv, **flv_pull_url}
+    except Exception as e:
+        print(f"Error message: {e} Error line: {e.__traceback__.tb_lineno}")
+        room_data = {'anchor_name': ""}
+    return room_data
+
+
 @trace_error_decorator
 async def get_douyin_app_stream_data(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict:
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0',
         'Accept-Language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
         'Referer': 'https://live.douyin.com/',
         'Cookie': 'ttwid=1%7CB1qls3GdnZhUov9o2NxOMxxYS2ff6OSvEWbv0ytbES4%7C1680522049%7C280d802d6d478e3e78d0c807f7c487e7ffec0ae4e5fdd6a0fe74c3c6af149511; my_rd=1; passport_csrf_token=3ab34460fa656183fccfb904b16ff742; passport_csrf_token_default=3ab34460fa656183fccfb904b16ff742; d_ticket=9f562383ac0547d0b561904513229d76c9c21; n_mh=hvnJEQ4Q5eiH74-84kTFUyv4VK8xtSrpRZG1AhCeFNI; store-region=cn-fj; store-region-src=uid; LOGIN_STATUS=1; __security_server_data_status=1; FORCE_LOGIN=%7B%22videoConsumedRemainSeconds%22%3A180%7D; pwa2=%223%7C0%7C3%7C0%22; download_guide=%223%2F20230729%2F0%22; volume_info=%7B%22isUserMute%22%3Afalse%2C%22isMute%22%3Afalse%2C%22volume%22%3A0.6%7D; strategyABtestKey=%221690824679.923%22; stream_recommend_feed_params=%22%7B%5C%22cookie_enabled%5C%22%3Atrue%2C%5C%22screen_width%5C%22%3A1536%2C%5C%22screen_height%5C%22%3A864%2C%5C%22browser_online%5C%22%3Atrue%2C%5C%22cpu_core_num%5C%22%3A8%2C%5C%22device_memory%5C%22%3A8%2C%5C%22downlink%5C%22%3A10%2C%5C%22effective_type%5C%22%3A%5C%224g%5C%22%2C%5C%22round_trip_time%5C%22%3A150%7D%22; VIDEO_FILTER_MEMO_SELECT=%7B%22expireTime%22%3A1691443863751%2C%22type%22%3Anull%7D; home_can_add_dy_2_desktop=%221%22; __live_version__=%221.1.1.2169%22; device_web_cpu_core=8; device_web_memory_size=8; xgplayer_user_id=346045893336; csrf_session_id=2e00356b5cd8544d17a0e66484946f28; odin_tt=724eb4dd23bc6ffaed9a1571ac4c757ef597768a70c75fef695b95845b7ffcd8b1524278c2ac31c2587996d058e03414595f0a4e856c53bd0d5e5f56dc6d82e24004dc77773e6b83ced6f80f1bb70627; __ac_nonce=064caded4009deafd8b89; __ac_signature=_02B4Z6wo00f01HLUuwwAAIDBh6tRkVLvBQBy9L-AAHiHf7; ttcid=2e9619ebbb8449eaa3d5a42d8ce88ec835; webcast_leading_last_show_time=1691016922379; webcast_leading_total_show_times=1; webcast_local_quality=sd; live_can_add_dy_2_desktop=%221%22; msToken=1JDHnVPw_9yTvzIrwb7cQj8dCMNOoesXbA_IooV8cezcOdpe4pzusZE7NB7tZn9TBXPr0ylxmv-KMs5rqbNUBHP4P7VBFUu0ZAht_BEylqrLpzgt3y5ne_38hXDOX8o=; msToken=jV_yeN1IQKUd9PlNtpL7k5vthGKcHo0dEh_QPUQhr8G3cuYv-Jbb4NnIxGDmhVOkZOCSihNpA2kvYtHiTW25XNNX_yrsv5FN8O6zm3qmCIXcEe0LywLn7oBO2gITEeg=; tt_scid=mYfqpfbDjqXrIGJuQ7q-DlQJfUSG51qG.KUdzztuGP83OjuVLXnQHjsz-BRHRJu4e986'
@@ -75,7 +155,7 @@ async def get_douyin_app_stream_data(url: str, proxy_addr: OptionalStr = None, c
 
     async def get_app_data(room_id: str, sec_uid: str) -> dict:
         app_params = {
-            "verifyFp": "verify_lxj5zv70_7szNlAB7_pxNY_48Vh_ALKF_GA1Uf3yteoOY",
+            "verifyFp": "verify_hwj52020_7szNlAB7_pxNY_48Vh_ALKF_GA1Uf3yteoOY",
             "type_id": "0",
             "live_id": "1",
             "room_id": room_id,
@@ -84,41 +164,31 @@ async def get_douyin_app_stream_data(url: str, proxy_addr: OptionalStr = None, c
             "app_id": "1128"
         }
         api2 = f'https://webcast.amemv.com/webcast/room/reflow/info/?{urllib.parse.urlencode(app_params)}'
-        json_str2 = await async_req(url=api2, proxy_addr=proxy_addr, headers=headers)
-        json_data2 = json.loads(json_str2)['data']
-        room_data2 = json_data2['room']
-        room_data2['anchor_name'] = room_data2['owner']['nickname']
-        return room_data2
+        a_bogus = ab_sign(urllib.parse.urlparse(api2).query, headers['User-Agent'])
+        api2 += "&a_bogus=" + a_bogus
+        try:
+            json_str2 = await async_req(url=api2, proxy_addr=proxy_addr, headers=headers)
+            if not json_str2:
+                raise Exception("it triggered risk control")
+            json_data2 = json.loads(json_str2)['data']
+            if not json_data2.get('room'):
+                raise Exception(f"{url} VR live is not supported")
+            room_data2 = json_data2['room']
+            room_data2['anchor_name'] = room_data2['owner']['nickname']
+            return room_data2
+        except Exception as e:
+            raise Exception(f"Douyin app data fetch error, because {e}.")
 
     try:
         web_rid = url.split('?')[0].split('live.douyin.com/')
         if len(web_rid) > 1:
-            web_rid = web_rid[1]
-            params = {
-                "aid": "6383",
-                "app_name": "douyin_web",
-                "live_id": "1",
-                "device_platform": "web",
-                "language": "zh-CN",
-                "browser_language": "zh-CN",
-                "browser_platform": "Win32",
-                "browser_name": "Chrome",
-                "browser_version": "116.0.0.0",
-                "web_rid": web_rid
-
-            }
-            api = f'https://live.douyin.com/webcast/room/web/enter/?{urllib.parse.urlencode(params)}'
-            json_str = await async_req(url=api, proxy_addr=proxy_addr, headers=headers)
-            json_data = json.loads(json_str)['data']
-            room_data = json_data['data'][0]
-            room_data['anchor_name'] = json_data['user']['nickname']
+            return await get_douyin_web_stream_data(url, proxy_addr, cookies)
         else:
-            data = await get_sec_user_id(url, proxy_addr=proxy_addr)
-
-            if data:
+            try:
+                data = await get_sec_user_id(url, proxy_addr=proxy_addr)
                 _room_id, _sec_uid = data
                 room_data = await get_app_data(_room_id, _sec_uid)
-            else:
+            except UnsupportedUrlError:
                 unique_id = await get_unique_id(url, proxy_addr=proxy_addr)
                 return await get_douyin_stream_data(f'https://live.douyin.com/{unique_id}')
 
@@ -138,9 +208,14 @@ async def get_douyin_app_stream_data(url: str, proxy_addr: OptionalStr = None, c
                     json_str = live_core_sdk_data['pull_data']['stream_data']
                 json_data = json.loads(json_str)
                 if 'origin' in json_data['data']:
+                    stream_data = live_core_sdk_data['pull_data']['stream_data']
+                    origin_data = json.loads(stream_data)['data']['origin']['main']
+                    sdk_params = json.loads(origin_data['sdk_params'])
+                    origin_hls_codec = sdk_params.get('VCodec') or ''
+
                     origin_url_list = json_data['data']['origin']['main']
-                    origin_m3u8 = {'ORIGIN': origin_url_list["hls"]}
-                    origin_flv = {'ORIGIN': origin_url_list["flv"]}
+                    origin_m3u8 = {'ORIGIN': origin_url_list["hls"] + '&codec=' + origin_hls_codec}
+                    origin_flv = {'ORIGIN': origin_url_list["flv"] + '&codec=' + origin_hls_codec}
                     hls_pull_url_map = room_data['stream_url']['hls_pull_url_map']
                     flv_pull_url = room_data['stream_url']['flv_pull_url']
                     room_data['stream_url']['hls_pull_url_map'] = {**origin_m3u8, **hls_pull_url_map}
@@ -193,8 +268,9 @@ async def get_douyin_stream_data(url: str, proxy_addr: OptionalStr = None, cooki
                 origin_url_list = json.loads(match_json_str3.group(1) + '}')
 
         if origin_url_list:
-            origin_m3u8 = {'ORIGIN': origin_url_list["hls"]}
-            origin_flv = {'ORIGIN': origin_url_list["flv"]}
+            origin_hls_codec = origin_url_list['sdk_params'].get('VCodec') or ''
+            origin_m3u8 = {'ORIGIN': origin_url_list["hls"] + '&codec=' + origin_hls_codec}
+            origin_flv = {'ORIGIN': origin_url_list["flv"] + '&codec=' + origin_hls_codec}
             hls_pull_url_map = json_data['stream_url']['hls_pull_url_map']
             flv_pull_url = json_data['stream_url']['flv_pull_url']
             json_data['stream_url']['hls_pull_url_map'] = {**origin_m3u8, **hls_pull_url_map}
@@ -209,18 +285,20 @@ async def get_douyin_stream_data(url: str, proxy_addr: OptionalStr = None, cooki
 @trace_error_decorator
 async def get_tiktok_stream_data(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict | None:
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
-        'Cookie': 'ttwid=1%7CM-rF193sJugKuNz2RGNt-rh6pAAR9IMceUSzlDnPCNI%7C1683274418%7Cf726d4947f2fc37fecc7aeb0cdaee52892244d04efde6f8a8edd2bb168263269; tiktok_webapp_theme=light; tt_chain_token=VWkygAWDlm1cFg/k8whmOg==; passport_csrf_token=6e422c5a7991f8cec7033a8082921510; passport_csrf_token_default=6e422c5a7991f8cec7033a8082921510; d_ticket=f8c267d4af4523c97be1ccb355e9991e2ae06; odin_tt=320b5f386cdc23f347be018e588873db7f7aea4ea5d1813681c3fbc018ea025dde957b94f74146dbc0e3612426b865ccb95ec8abe4ee36cca65f15dbffec0deff7b0e69e8ea536d46e0f82a4fc37d211; cmpl_token=AgQQAPNSF-RO0rT04baWtZ0T_jUjl4fVP4PZYM2QPw; uid_tt=319b558dbba684bb1557206c92089cd113a875526a89aee30595925d804b81c7; uid_tt_ss=319b558dbba684bb1557206c92089cd113a875526a89aee30595925d804b81c7; sid_tt=ad5e736f4bedb2f6d42ccd849e706b1d; sessionid=ad5e736f4bedb2f6d42ccd849e706b1d; sessionid_ss=ad5e736f4bedb2f6d42ccd849e706b1d; store-idc=useast5; store-country-code=us; store-country-code-src=uid; tt-target-idc=useast5; tt-target-idc-sign=qXNk0bb1pDQ0FbCNF120Pl9WWMLZg9Edv5PkfyCbS4lIk5ieW5tfLP7XWROnN0mEaSlc5hg6Oji1pF-yz_3ZXnUiNMrA9wNMPvI6D9IFKKVmq555aQzwPIGHv0aQC5dNRgKo5Z5LBkgxUMWEojTKclq2_L8lBciw0IGdhFm_XyVJtbqbBKKgybGDLzK8ZyxF4Jl_cYRXaDlshZjc38JdS6wruDueRSHe7YvNbjxCnApEFUv-OwJANSPU_4rvcqpVhq3JI2VCCfw-cs_4MFIPCDOKisk5EhAo2JlHh3VF7_CLuv80FXg_7ZqQ2pJeMOog294rqxwbbQhl3ATvjQV_JsWyUsMd9zwqecpylrPvtySI2u1qfoggx1owLrrUynee1R48QlanLQnTNW_z1WpmZBgVJqgEGLwFoVOmRzJuFFNj8vIqdjM2nDSdWqX8_wX3wplohkzkPSFPfZgjzGnQX28krhgTytLt7BXYty5dpfGtsdb11WOFHM6MZ9R9uLVB; sid_guard=ad5e736f4bedb2f6d42ccd849e706b1d%7C1690990657%7C15525213%7CMon%2C+29-Jan-2024+08%3A11%3A10+GMT; sid_ucp_v1=1.0.0-KGM3YzgwYjZhODgyYWI1NjIwNTA0NjBmOWUxMGRhMjIzYTI2YjMxNDUKGAiqiJ30keKD5WQQwfCppgYYsws4AkDsBxAEGgd1c2Vhc3Q1IiBhZDVlNzM2ZjRiZWRiMmY2ZDQyY2NkODQ5ZTcwNmIxZA; ssid_ucp_v1=1.0.0-KGM3YzgwYjZhODgyYWI1NjIwNTA0NjBmOWUxMGRhMjIzYTI2YjMxNDUKGAiqiJ30keKD5WQQwfCppgYYsws4AkDsBxAEGgd1c2Vhc3Q1IiBhZDVlNzM2ZjRiZWRiMmY2ZDQyY2NkODQ5ZTcwNmIxZA; tt_csrf_token=dD0EIH8q-pe3qDQsCyyD1jLN6KizJDRjOEyk; __tea_cache_tokens_1988={%22_type_%22:%22default%22%2C%22user_unique_id%22:%227229608516049831425%22%2C%22timestamp%22:1683274422659}; ttwid=1%7CM-rF193sJugKuNz2RGNt-rh6pAAR9IMceUSzlDnPCNI%7C1694002151%7Cd89b77afc809b1a610661a9d1c2784d80ebef9efdd166f06de0d28e27f7e4efe; msToken=KfJAVZ7r9D_QVeQlYAUZzDFbc1Yx-nZz6GF33eOxgd8KlqvTg1lF9bMXW7gFV-qW4MCgUwnBIhbiwU9kdaSpgHJCk-PABsHCtTO5J3qC4oCTsrXQ1_E0XtbqiE4OVLZ_jdF1EYWgKNPT2SnwGkQ=; msToken=KfJAVZ7r9D_QVeQlYAUZzDFbc1Yx-nZz6GF33eOxgd8KlqvTg1lF9bMXW7gFV-qW4MCgUwnBIhbiwU9kdaSpgHJCk-PABsHCtTO5J3qC4oCTsrXQ1_E0XtbqiE4OVLZ_jdF1EYWgKNPT2SnwGkQ='
+        'referer': 'https://www.tiktok.com/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/141.0.0.0 Safari/537.36',
+        'cookie': cookies or '1%7Cz7FKki38aKyy7i-BC9rEDwcrVvjcLcFEL6QIeqldoy4%7C1761302831%7C6c1461e9f1f980cbe0404c5190'
+                             '5177d5d53bbd822e1bf66128887d942c9c3e2f'
     }
-    if cookies:
-        headers['Cookie'] = cookies
+
     for i in range(3):
-        html_str = await async_req(url=url, proxy_addr=proxy_addr, headers=headers, abroad=True)
+        html_str = await async_req(url=url, proxy_addr=proxy_addr, headers=headers, abroad=True, http2=False)
         time.sleep(1)
         if "We regret to inform you that we have discontinued operating TikTok" in html_str:
             msg = re.search('<p>\n\\s+(We regret to inform you that we have discontinu.*?)\\.\n\\s+</p>', html_str)
             raise ConnectionError(
-                f"Your proxy node's regional network is blocked from accessing TikTok; please switch to a node in "
+                "Your proxy node's regional network is blocked from accessing TikTok; please switch to a node in "
                 f"another region to access. {msg.group(1) if msg else ''}"
             )
         if 'UNEXPECTED_EOF_WHILE_READING' not in html_str:
@@ -577,18 +655,21 @@ async def get_yy_stream_data(url: str, proxy_addr: OptionalStr = None, cookies: 
 @trace_error_decorator
 async def get_bilibili_room_info_h5(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> str:
     headers = {
+        'user-agent': 'Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile Safari/537.36',
+        'accept-language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
+        'cookie': '',
         'origin': 'https://live.bilibili.com',
-        'referer': 'https://live.bilibili.com/',
-        'user-agent': 'Mozilla/5.0 (Linux; Android 8.0.0; SM-G955U Build/R16NW) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36 Edg/121.0.0.0',
+        'referer': 'https://live.bilibili.com/26066074',
     }
     if cookies:
-        headers['Cookie'] = cookies
+        headers['cookie'] = cookies
 
     room_id = url.split('?')[0].rsplit('/', maxsplit=1)[1]
     api = f'https://api.live.bilibili.com/xlive/web-room/v1/index/getH5InfoByRoom?room_id={room_id}'
     json_str = await async_req(api, proxy_addr=proxy_addr, headers=headers)
     room_info = json.loads(json_str)
-    title = room_info['data']['room_info']['title']
+    title = room_info['data']['room_info'].get('title') if room_info.get('data') else ''
     return title
 
 
@@ -684,53 +765,6 @@ async def get_bilibili_stream_data(url: str, qn: str = '10000', platform: str = 
         m3u8_url = host + base_url + extra
         return m3u8_url
 
-
-@trace_error_decorator
-async def get_xhs_stream_url_profile(
-        url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None, author: OptionalStr = None
-) -> dict:
-    headers = {
-        'User-Agent': 'ios/7.830 (ios 17.0; ; iPhone 15 (A2846/A3089/A3090/A3092))',
-        'xy-common-params': 'platform=iOS&sid=session.1722166379345546829388',
-        'referer': 'https://app.xhs.cn/',
-    }
-    if cookies:
-        headers['Cookie'] = cookies
-    host_id = get_params(url, 'host_id')
-    user_id = re.search('/user/profile/(.*?)(?=/|\\?|$)', url)
-    user_id = user_id.group(1) if user_id else host_id
-    result = {"anchor_name": '', "is_live": False}
-    if user_id:
-        params = {'user_id_list': user_id}
-        app_api = f'https://live-room.xiaohongshu.com/api/sns/v1/live/user_status?{urllib.parse.urlencode(params)}'
-        json_str = await async_req(app_api, proxy_addr=proxy_addr, headers=headers)
-        json_data = json.loads(json_str)
-        if json_data.get('data'):
-            live_link = json_data['data'][0]['live_link']
-            anchor_name = get_params(live_link, "host_nickname")
-            flv_url = get_params(live_link, "flvUrl")
-            room_id = flv_url.split('live/')[1].split('.')[0]
-            flv_url = f'http://live-source-play.xhscdn.com/live/{room_id}.flv'
-            m3u8_url = flv_url.replace('.flv', '.m3u8')
-            result |= {
-                "anchor_name": anchor_name,
-                "is_live": True,
-                "flv_url": flv_url,
-                "m3u8_url": m3u8_url,
-                'record_url': flv_url
-            }
-        if not result["anchor_name"]:
-            if author:
-                result['anchor_name'] = author
-            else:
-                html_str = await async_req(url, proxy_addr=proxy_addr, headers=headers)
-                json_str = re.search('window.__INITIAL_STATE__=(.*?)</script>', html_str, re.S).group(1)
-                json_data = json.loads(json_str)
-                anchor_name = json_data['profile']['userInfo']['nickname']
-                result['anchor_name'] = anchor_name
-    return result
-
-
 @trace_error_decorator
 async def get_xhs_stream_url(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict:
     headers = {
@@ -741,38 +775,49 @@ async def get_xhs_stream_url(url: str, proxy_addr: OptionalStr = None, cookies: 
     if cookies:
         headers['Cookie'] = cookies
 
-    if 'xhslink.com' in url:
+    if "xhslink.com" in url:
         url = await async_req(url, proxy_addr=proxy_addr, headers=headers, redirect_url=True)
 
+    host_id = get_params(url, "host_id")
+    user_id = re.search("/user/profile/(.*?)(?=/|\\?|$)", url)
+    user_id = user_id.group(1) if user_id else host_id
     result = {"anchor_name": '', "is_live": False}
-    room_id = re.search('/livestream/(.*?)(?=/|\\?|$)', url)
-    if room_id:
-        html_str = await async_req(url, proxy_addr=proxy_addr, headers=headers)
-        json_str = re.search('window.__INITIAL_STATE__=(.*?)</script>', html_str, re.S).group(1)
+    html_str = await async_req(url, proxy_addr=proxy_addr, headers=headers)
+    match_data = re.search("<script>window.__INITIAL_STATE__=(.*?)</script>", html_str)
+
+    if match_data:
+        json_str = match_data.group(1).replace("undefined", "null")
         json_data = json.loads(json_str)
-        room_data = json_data['liveStream']['roomData']
-        anchor_name = room_data['hostInfo']['nickName']
-        live_status = json_data['liveStream']['liveStatus']
-        result['anchor_name'] = anchor_name
-        if live_status == 'end':
-            return await get_xhs_stream_url_profile(url, proxy_addr, cookies, anchor_name)
-        title = room_data['roomInfo']['roomTitle']
-        play_data = json.loads(room_data['roomInfo']['pullConfig'])
-        m3u8_url_list = []
-        flv_url_list = []
-        for item in play_data['h264']:
-            play_url = item['master_url']
-            if play_url.endswith('.m3u8'):
-                m3u8_url_list.append(play_url)
-            else:
-                flv_url_list.append(play_url)
-        flv_url = flv_url_list[0]
-        m3u8_url = m3u8_url_list[0]
-        record_url = m3u8_url if m3u8_url else flv_url
-        result |= {'is_live': True, "title": title, "flv_url": flv_url, "m3u8_url": m3u8_url, 'record_url': record_url}
-        return result
-    else:
-        return await get_xhs_stream_url_profile(url, proxy_addr, cookies)
+
+        if json_data.get("liveStream"):
+            stream_data = json_data["liveStream"]
+            if stream_data.get("liveStatus") == "success":
+                room_info = stream_data["roomData"]["roomInfo"]
+                title = room_info.get("roomTitle")
+                if title and "回放" not in title:
+                    live_link = room_info["deeplink"]
+                    anchor_name = get_params(live_link, "host_nickname")
+                    flv_url = get_params(live_link, "flvUrl")
+                    room_id = flv_url.split('live/')[1].split('.')[0]
+                    flv_url = f"http://live-source-play.xhscdn.com/live/{room_id}.flv"
+                    m3u8_url = flv_url.replace('.flv', '.m3u8')
+                    result |= {
+                        "anchor_name": anchor_name,
+                        "is_live": True,
+                        "title": title,
+                        "flv_url": flv_url,
+                        "m3u8_url": m3u8_url,
+                        'record_url': flv_url
+                    }
+                    return result
+
+    profile_url = f"https://www.xiaohongshu.com/user/profile/{user_id}"
+    html_str = await async_req(profile_url, proxy_addr=proxy_addr, headers=headers)
+    anchor_name = re.search("<title>@(.*?) 的个人主页</title>", html_str)
+    if anchor_name:
+        result["anchor_name"] = anchor_name.group(1)
+
+    return result
 
 
 @trace_error_decorator
@@ -796,7 +841,7 @@ async def get_bigo_stream_url(url: str, proxy_addr: OptionalStr = None, cookies:
         if '&h=' in url:
             room_id = url.split('&h=')[-1]
         else:
-            room_id = re.search('www.bigo.tv/cn/(\\w+)', url).group(1)
+            room_id = url.split("?")[0].rsplit("/", maxsplit=1)[-1]
 
     data = {'siteId': room_id}  # roomId
     url2 = 'https://ta.bigo.tv/official_website/studio/getInternalStudioInfo'
@@ -813,8 +858,16 @@ async def get_bigo_stream_url(url: str, proxy_addr: OptionalStr = None, cookies:
         result['record_url'] = m3u8_url
         result |= {"title": live_title, "is_live": True, "m3u8_url": m3u8_url, 'record_url': m3u8_url}
     elif result['anchor_name'] == '':
-        html_str = await async_req(url=f'https://www.bigo.tv/cn/{room_id}', proxy_addr=proxy_addr, headers=headers)
-        result['anchor_name'] = re.search('<title>欢迎来到(.*?)的直播间</title>', html_str, re.DOTALL).group(1)
+        html_str = await async_req(url=f'https://www.bigo.tv/{url.split("/")[3]}/{room_id}',
+                                   proxy_addr=proxy_addr, headers=headers)
+        match_anchor_name = re.search('<title>欢迎来到(.*?)的直播间</title>', html_str, re.DOTALL)
+        if match_anchor_name:
+            anchor_name = match_anchor_name.group(1)
+        else:
+            match_anchor_name = re.search('<meta data-n-head="ssr" data-hid="og:title" property="og:title" '
+                                          'content="(.*?) - BIGO LIVE">', html_str, re.DOTALL)
+            anchor_name = match_anchor_name.group(1)
+        result['anchor_name'] = anchor_name
 
     return result
 
@@ -838,7 +891,7 @@ async def get_blued_stream_url(url: str, proxy_addr: OptionalStr = None, cookies
     result = {"anchor_name": anchor_name, "is_live": False}
 
     if live_status:
-        m3u8_url = "http:" + json_data['liveInfo']['liveUrl']
+        m3u8_url = json_data['liveInfo']['liveUrl']
         result |= {"is_live": True, "m3u8_url": m3u8_url, 'record_url': m3u8_url}
     return result
 
@@ -951,6 +1004,76 @@ async def get_sooplive_tk(url: str, rtype: str, proxy_addr: OptionalStr = None, 
         return f"{bj_name}-{bj_id}", json_data['CHANNEL']['BNO']
 
 
+def get_soop_headers(cookies):
+    headers = {
+        'client-id': str(uuid.uuid4()),
+        'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, '
+                      'like Gecko) Version/18.5 Mobile/15E148 Safari/604.1 Edg/141.0.0.0',
+    }
+    if cookies:
+        headers['cookie'] = cookies
+    return headers
+
+
+async def _get_soop_channel_info_global(bj_id, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> str:
+    headers = get_soop_headers(cookies)
+    api = 'https://api.sooplive.com/v2/channel/info/' + str(bj_id)
+    json_str = await async_req(api, proxy_addr=proxy_addr, headers=headers)
+    json_data = json.loads(json_str)
+    nickname = json_data['data']['streamerChannelInfo']['nickname']
+    channelId = json_data['data']['streamerChannelInfo']['channelId']
+    anchor_name = f"{nickname}-{channelId}"
+    return anchor_name
+
+
+async def _get_soop_stream_info_global(bj_id, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> tuple:
+    headers = get_soop_headers(cookies)
+    api = 'https://api.sooplive.com/v2/stream/info/' + str(bj_id)
+    json_str = await async_req(api, proxy_addr=proxy_addr, headers=headers)
+    json_data = json.loads(json_str)
+    status = json_data['data']['isStream']
+    title = json_data['data']['title']
+    return status, title
+
+
+async def _fetch_web_stream_data_global(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict:
+    split_url = url.split('/')
+    bj_id = split_url[3] if len(split_url) < 6 else split_url[5]
+    anchor_name = await _get_soop_channel_info_global(bj_id)
+    result = {"anchor_name": anchor_name or '', "is_live": False, "live_url": url}
+    status, title = await _get_soop_stream_info_global(bj_id)
+    if not status:
+        return result
+    else:
+        async def _get_url_list(m3u8: str) -> list[str]:
+            headers = {
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                              'Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0',
+            }
+            if cookies:
+                headers['cookie'] = cookies
+            resp = await async_req(url=m3u8, proxy_addr=proxy_addr, headers=headers)
+            play_url_list = []
+            url_prefix = '/'.join(m3u8.split('/')[0:3])
+            for i in resp.split('\n'):
+                if not i.startswith('#') and i.strip():
+                    play_url_list.append(url_prefix + i.strip())
+            bandwidth_pattern = re.compile(r'BANDWIDTH=(\d+)')
+            bandwidth_list = bandwidth_pattern.findall(resp)
+            url_to_bandwidth = {purl: int(bandwidth) for bandwidth, purl in zip(bandwidth_list, play_url_list)}
+            play_url_list = sorted(play_url_list, key=lambda purl: url_to_bandwidth[purl], reverse=True)
+            return play_url_list
+
+        m3u8_url = 'https://global-media.sooplive.com/live/' + str(bj_id) + '/master.m3u8'
+        result |= {
+            'is_live': True,
+            'title': title,
+            'm3u8_url': m3u8_url,
+            'play_url_list': await _get_url_list(m3u8_url)
+        }
+    return result
+
+
 @trace_error_decorator
 async def get_sooplive_stream_data(
         url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None,
@@ -964,6 +1087,9 @@ async def get_sooplive_stream_data(
     }
     if cookies:
         headers['Cookie'] = cookies
+
+    if "sooplive.com" in url:
+        return await _fetch_web_stream_data_global(url, proxy_addr, cookies)
 
     split_url = url.split('/')
     bj_id = split_url[3] if len(split_url) < 6 else split_url[5]
@@ -1045,8 +1171,8 @@ async def get_sooplive_stream_data(
             else:
                 raise RuntimeError("sooplive login failed, please check if the account and password are correct")
         elif json_data['data']['code'] == -6001:
-            print(f"error message：Please check if the input sooplive live room address "
-                  f"is correct.")
+            print("error message：Please check if the input sooplive live room address "
+                  "is correct.")
             return result
     if json_data['result'] == 1 and anchor_name:
         broad_no = json_data['data']['broad_no']
@@ -1151,6 +1277,8 @@ async def get_pandatv_stream_data(url: str, proxy_addr: OptionalStr = None, cook
     json_str = await async_req('https://api.pandalive.co.kr/v1/member/bj',
                        proxy_addr=proxy_addr, headers=headers, data=data, abroad=True)
     json_data = json.loads(json_str)
+    if "bjInfo" not in json_data:
+        raise RuntimeError(json_data.get("message", 'Unknown error'))
     anchor_id = json_data['bjInfo']['id']
     anchor_name = f"{json_data['bjInfo']['nick']}-{anchor_id}"
     result['anchor_name'] = anchor_name
@@ -1199,7 +1327,7 @@ async def get_maoerfm_stream_url(url: str, proxy_addr: OptionalStr = None, cooki
         m3u8_url = stream_list['hls_pull_url']
         flv_url = stream_list['flv_pull_url']
         title = json_data['info']['room']['name']
-        result |= {'is_live': True, 'title': title, 'm3u8_url': m3u8_url, 'flv_url': flv_url, 'record_url': m3u8_url}
+        result |= {'is_live': True, 'title': title, 'm3u8_url': m3u8_url, 'flv_url': flv_url, 'record_url': flv_url}
     return result
 
 
@@ -1280,7 +1408,7 @@ async def login_flextv(username: str, password: str, proxy_addr: OptionalStr = N
         'accept': 'application/json, text/plain, */*',
         'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
         'content-type': 'application/json;charset=UTF-8',
-        'referer': 'https://www.flextv.co.kr/',
+        'referer': 'https://www.ttinglive.com/',
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
     }
 
@@ -1292,7 +1420,7 @@ async def login_flextv(username: str, password: str, proxy_addr: OptionalStr = N
         'device': 'PCWEB',
     }
 
-    url = 'https://api.flextv.co.kr/v2/api/auth/signin'
+    url = 'https://www.ttinglive.com/v2/api/auth/signin'
 
     try:
         print("Logging into FlexTV platform...")
@@ -1320,13 +1448,13 @@ async def get_flextv_stream_url(
         headers = {
             'accept': 'application/json, text/plain, */*',
             'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
-            'referer': 'https://www.flextv.co.kr/',
+            'referer': 'https://www.ttinglive.com/',
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
         }
         user_id = url.split('/live')[0].rsplit('/', maxsplit=1)[-1]
         if cookie:
             headers['Cookie'] = cookie
-        play_api = f'https://api.flextv.co.kr/api/channels/{user_id}/stream?option=all'
+        play_api = f'https://www.ttinglive.com/api/channels/{user_id}/stream?option=all'
         json_str = await async_req(play_api, proxy_addr=proxy_addr, headers=headers, abroad=True)
         if 'HTTP Error 400: Bad Request' in json_str:
             raise ConnectionError(
@@ -1348,7 +1476,7 @@ async def get_flextv_stream_data(
     headers = {
         'accept': 'application/json, text/plain, */*',
         'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
-        'referer': 'https://www.flextv.co.kr/',
+        'referer': 'https://www.ttinglive.com/',
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
     }
     if cookies:
@@ -1357,7 +1485,7 @@ async def get_flextv_stream_data(
     result = {"anchor_name": '', "is_live": False}
     new_cookies = None
     try:
-        url2 = f'https://www.flextv.co.kr/channels/{user_id}/live'
+        url2 = f'https://www.ttinglive.com/channels/{user_id}/live'
         html_str = await async_req(url2, proxy_addr=proxy_addr, headers=headers, abroad=True)
         json_str = re.search('<script id="__NEXT_DATA__" type=".*">(.*?)</script>', html_str).group(1)
         json_data = json.loads(json_str)
@@ -1389,13 +1517,17 @@ async def get_flextv_stream_data(
             result["anchor_name"] = anchor_name
             play_url = await get_flextv_stream_url(url=url, proxy_addr=proxy_addr, cookies=cookies)
             if play_url:
-                play_url_list = await get_play_url_list(m3u8=play_url, proxy=proxy_addr, header=headers, abroad=True)
-                if play_url_list:
-                    result['m3u8_url'] = play_url
-                    result['play_url_list'] = play_url_list
-                    result['is_live'] = True
+                result['is_live'] = True
+                if '.m3u8' in play_url:
+                    play_url_list = await get_play_url_list(m3u8=play_url, proxy=proxy_addr, header=headers, abroad=True)
+                    if play_url_list:
+                        result['m3u8_url'] = play_url
+                        result['play_url_list'] = play_url_list
+                else:
+                    result['flv_url'] = play_url
+                    result['record_url'] = play_url
         else:
-            url2 = f'https://www.flextv.co.kr/channels/{user_id}'
+            url2 = f'https://www.ttinglive.com/channels/{user_id}'
             html_str = await async_req(url2, proxy_addr=proxy_addr, headers=headers, abroad=True)
             anchor_name = re.search('<meta name="twitter:title" content="(.*?)의', html_str).group(1)
             result["anchor_name"] = anchor_name
@@ -1652,7 +1784,7 @@ async def get_popkontv_stream_url(
                 'signId': username,
                 'version': '4.6.2',
             }
-            play_api = 'https://www.popkontv.com/api/proxy/broadcast/v1/castwatchonoff'
+            play_api = 'https://www.popkontv.com/api/proxy/broadcast/v1/castwatchonoffguest'
             return await async_req(play_api, proxy_addr=proxy_addr, json_data=data, headers=header, abroad=True)
 
         json_str = await fetch_data(headers, partner_code)
@@ -1733,7 +1865,7 @@ async def login_twitcasting(
     }
     try:
         cookie_dict = await async_req(login_api, proxy_addr=proxy_addr, headers=headers,
-                                      json_data=data, return_cookies=True, timeout=20)
+                                      data=data, return_cookies=True, timeout=20)
         if 'tc_ss' in cookie_dict:
             cookie = utils.dict_to_cookie_str(cookie_dict)
             return cookie
@@ -1782,7 +1914,7 @@ async def get_twitcasting_stream_url(
                                    "configuration file is correct")
             print("TwitCasting login successful! Starting to fetch data...")
             headers['Cookie'] = new_cookie
-        anchor_name, live_status, live_title = get_data(headers)
+        anchor_name, live_status, live_title = await get_data(headers)
     except AttributeError:
         print("Failed to retrieve TwitCasting data, attempting to log in...")
         new_cookie = await login_twitcasting(
@@ -1796,8 +1928,17 @@ async def get_twitcasting_stream_url(
 
     result["anchor_name"] = anchor_name
     if live_status == 'true':
-        play_url = f'https://twitcasting.tv/{anchor_id}/metastream.m3u8/?video=1&mode=source'
-        result |= {'title': live_title, 'is_live': True, "m3u8_url": play_url, "record_url": play_url}
+        url_streamserver = f"https://twitcasting.tv/streamserver.php?target={anchor_id}&mode=client&player=pc_web"
+        stream_data = await async_req(url_streamserver, proxy_addr=proxy_addr, headers=headers)
+        json_data = json.loads(stream_data)
+        if not json_data.get('tc-hls') or not json_data['tc-hls'].get("streams"):
+            raise RuntimeError("No m3u8_url,please check the url")
+
+        stream_dict = json_data['tc-hls']["streams"]
+        quality_order = {"high": 0, "medium": 1, "low": 2}
+        sorted_streams = sorted(stream_dict.items(), key=lambda item: quality_order[item[0]])
+        play_url_list = [url for quality, url in sorted_streams]
+        result |= {'title': live_title, 'is_live': True, "play_url_list": play_url_list}
     result['new_cookies'] = new_cookie
     return result
 
@@ -1868,6 +2009,7 @@ async def get_weibo_stream_data(url: str, proxy_addr: OptionalStr = None, cookie
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
         'Cookie': 'XSRF-TOKEN=qAP-pIY5V4tO6blNOhA4IIOD; SUB=_2AkMRNMCwf8NxqwFRmfwWymPrbI9-zgzEieKnaDFrJRMxHRl-yT9kqmkhtRB6OrTuX5z9N_7qk9C3xxEmNR-8WLcyo2PM; SUBP=0033WrSXqPxfM72-Ws9jqgMF55529P9D9WWemwcqkukCduUO11o9sBqA; WBPSESS=Wk6CxkYDejV3DDBcnx2LOXN9V1LjdSTNQPMbBDWe4lO2HbPmXG_coMffJ30T-Avn_ccQWtEYFcq9fab1p5RR6PEI6w661JcW7-56BszujMlaiAhLX-9vT4Zjboy1yf2l',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
+        'Referer': 'https://weibo.com/u/5885340893'
     }
     if cookies:
         headers['Cookie'] = cookies
@@ -2002,6 +2144,7 @@ async def get_twitchtv_stream_data(url: str, proxy_addr: OptionalStr = None, coo
         'Accept-Language': 'en-US',
         'Referer': 'https://www.twitch.tv/',
         'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko',
+        'device-id': generate_random_string(16).lower(),
     }
 
     if cookies:
@@ -2071,6 +2214,12 @@ async def get_liveme_stream_url(url: str, proxy_addr: OptionalStr = None, cookie
     }
     if cookies:
         headers['Cookie'] = cookies
+
+    if 'index.html' not in url:
+        html_str = await async_req(url, proxy_addr=proxy_addr, headers=headers, abroad=True)
+        match_url = re.search('<meta property="og:url" content="(.*?)">', html_str)
+        if match_url:
+            url = match_url.group(1)
 
     room_id = url.split("/index.html")[0].rsplit('/', maxsplit=1)[-1]
     sign_data = execjs.compile(open(f'{JS_SCRIPT_PATH}/liveme.js').read()).call('sign', room_id,
@@ -2778,7 +2927,6 @@ async def get_6room_stream_url(url: str, proxy_addr: OptionalStr = None, cookies
         'rid': '',
         'ruid': room_id,
     }
-
     api = 'https://v.6.cn/coop/mobile/index.php?padapi=coop-mobile-inroom.php'
     json_str = await async_req(api, data=data, proxy_addr=proxy_addr, headers=headers)
     json_data = json.loads(json_str)
@@ -2787,8 +2935,7 @@ async def get_6room_stream_url(url: str, proxy_addr: OptionalStr = None, cookies
     result = {"anchor_name": anchor_name, "is_live": False}
     if flv_title:
         flv_url = f'https://wlive.6rooms.com/httpflv/{flv_title}.flv'
-        record_url = await async_req(flv_url, proxy_addr=proxy_addr, headers=headers, redirect_url=True)
-        result |= {'is_live': True, 'flv_url': flv_url, 'record_url': record_url}
+        result |= {'is_live': True, 'flv_url': flv_url, 'record_url': flv_url}
     return result
 
 
@@ -2923,7 +3070,7 @@ async def get_taobao_stream_url(url: str, proxy_addr: OptionalStr = None, cookie
         params |= {'sign': sign, 't': t13}
         api = f'https://h5api.m.taobao.com/h5/mtop.mediaplatform.live.livedetail/4.0/?{urllib.parse.urlencode(params)}'
         jsonp_str, new_cookie = await async_req(url=api, proxy_addr=proxy_addr, headers=headers, timeout=20,
-                                                include_cookies=True)
+                                                return_cookies=True, include_cookies=True)
         json_data = utils.jsonp_to_json(jsonp_str)
 
         ret_msg = json_data['ret']
@@ -2934,8 +3081,18 @@ async def get_taobao_stream_url(url: str, proxy_addr: OptionalStr = None, cookie
             if live_status == '1':
                 live_title = json_data['data']['title']
                 play_url_list = json_data['data']['liveUrlList']
-                play_url_list = sorted(play_url_list, key=lambda x: int(x['codeLevel']), reverse=True)
+
+                def get_sort_key(item):
+                    definition_priority = {
+                        "lld": 0, "ld": 1, "md": 2, "hd": 3, "ud": 4
+                    }
+                    def_value = item.get('definition') or item.get('newDefinition')
+                    priority = definition_priority.get(def_value, -1)
+                    return priority
+
+                play_url_list = sorted(play_url_list, key=get_sort_key, reverse=True)
                 result |= {"is_live": True, "title": live_title, "play_url_list": play_url_list, 'live_id': live_id}
+
             return result
         else:
             print(f'Error: Taobao live data fetch failed, {ret_msg[0]}')
@@ -3022,7 +3179,7 @@ async def get_faceit_stream_data(url: str, proxy_addr: OptionalStr = None, cooki
 
     if cookies:
         headers['Cookie'] = cookies
-    nickname = re.findall(f'/players/(.*?)/stream', url)[0]
+    nickname = re.findall('/players/(.*?)/stream', url)[0]
     api = f'https://www.faceit.com/api/users/v1/nicknames/{nickname}'
     json_str = await async_req(api, proxy_addr=proxy_addr, headers=headers)
     json_data = json.loads(json_str)
@@ -3039,4 +3196,200 @@ async def get_faceit_stream_data(url: str, proxy_addr: OptionalStr = None, cooki
         result['anchor_name'] = anchor_name
     else:
         result = {'anchor_name': anchor_name, 'is_live': False}
+    return result
+
+
+@trace_error_decorator
+async def get_migu_stream_url(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict:
+    headers = {
+            'origin': 'https://www.miguvideo.com',
+            'referer': 'https://www.miguvideo.com/',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0',
+            'appCode': 'miguvideo_default_www',
+            'appId': 'miguvideo',
+            'channel': 'H5',
+        }
+
+    if cookies:
+        headers['Cookie'] = cookies
+
+    web_id = url.split('?')[0].rsplit('/')[-1]
+    api = f'https://vms-sc.miguvideo.com/vms-match/v6/staticcache/basic/basic-data/{web_id}/miguvideo'
+    json_str = await async_req(api, proxy_addr=proxy_addr, headers=headers)
+    json_data = json.loads(json_str)
+
+    anchor_name = json_data['body']['title']
+    live_title = json_data['body'].get('title') + '-' + json_data['body'].get('detailPageTitle', '')
+    room_id = json_data['body'].get('pId')
+
+    result = {"anchor_name": anchor_name, "is_live": False}
+    if not room_id:
+        return result
+
+    params = {
+        'contId': room_id,
+        'rateType': '3',
+        'clientId': str(uuid.uuid4()),
+        'timestamp': int(time.time() * 1000),
+        'flvEnable': 'true',
+        'xh265': 'false',
+        'chip': 'mgwww',
+        'channelId': '',
+    }
+
+    api = f'https://webapi.miguvideo.com/gateway/playurl/v3/play/playurl?{urllib.parse.urlencode(params)}'
+    json_str = await async_req(api, proxy_addr=proxy_addr, headers=headers)
+    json_data = json.loads(json_str)
+    live_status = json_data['body']['content']['currentLive']
+    if live_status != '1':
+        return result
+    else:
+        result['title'] = live_title
+        source_url = json_data['body']['urlInfo']['url']
+
+        async def _get_dd_calcu(url):
+            try:
+                result = subprocess.run(
+                    ["node", f"{JS_SCRIPT_PATH}/migu.js", url],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                return result.stdout.strip()
+            except execjs.ProgramError:
+                raise execjs.ProgramError('Failed to execute JS code. Please check if the Node.js environment')
+
+        ddCalcu = await _get_dd_calcu(source_url)
+        real_source_url = f'{source_url}&ddCalcu={ddCalcu}&sv=10010'
+        if '.m3u8' in real_source_url:
+            m3u8_url = await async_req(
+                real_source_url, proxy_addr=proxy_addr, headers=headers, redirect_url=True)
+            result['m3u8_url'] = m3u8_url
+            result['record_url'] = m3u8_url
+        else:
+            result['flv_url'] = real_source_url
+            result['record_url'] = real_source_url
+        result['is_live'] = True
+    return result
+
+
+@trace_error_decorator
+async def get_lianjie_stream_url(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict:
+    headers = {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0',
+            'accept-language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
+        }
+
+    if cookies:
+        headers['cookie'] = cookies
+
+    room_id = url.split('?')[0].rsplit('lailianjie.com/', maxsplit=1)[-1]
+    play_api = f'https://api.lailianjie.com/ApiServices/service/live/getRoomInfo?&_$t=&_sign=&roomNumber={room_id}'
+    json_str = await async_req(play_api, proxy_addr=proxy_addr, headers=headers)
+    json_data = json.loads(json_str)
+
+    room_data = json_data['data']
+    anchor_name = room_data['nickname']
+    live_status = room_data['isonline']
+
+    result = {"anchor_name": anchor_name, "is_live": False}
+    if live_status == 1:
+        title = room_data['defaultRoomTitle']
+        webrtc_url = room_data['videoUrl']
+        https_url = "https://" + webrtc_url.split('webrtc://')[1]
+        flv_url = https_url.replace('?', '.flv?')
+        m3u8_url = https_url.replace('?', '.m3u8?')
+        result |= {'is_live': True, 'title': title, 'm3u8_url': m3u8_url, 'flv_url': flv_url, 'record_url': flv_url}
+    return result
+
+
+@trace_error_decorator
+async def get_laixiu_stream_url(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict:
+    def generate_uuid(ua_type: str):
+        if ua_type == "mobile":
+            return str(uuid.uuid4())
+        return str(uuid.uuid4()).replace('-', '')
+
+    def calculate_sign(ua_type: str = 'pc'):
+        a = int(time.time() * 1000)
+        s = generate_uuid(ua_type)
+        u = 'kk792f28d6ff1f34ec702c08626d454b39pro'
+
+        input_str = f"web{s}{a}{u}"
+        md5_hash = hashlib.md5(input_str.encode('utf-8')).hexdigest()
+
+        return {
+            'timestamp': a,
+            'imei': s,
+            'requestId': md5_hash,
+            'inputString': input_str
+        }
+
+    sign_data = calculate_sign(ua_type='pc')
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0',
+        'mobileModel': 'web',
+        'timestamp': str(sign_data['timestamp']),
+        'loginType': '2',
+        'versionCode': '10003',
+        'imei': sign_data['imei'],
+        'requestId': sign_data['requestId'],
+        'channel': '9',
+        'version': '1.0.0',
+        'os': 'web',
+        'platform': 'WEB',
+        'Origin': 'https://www.imkktv.com',
+        'Referer': 'https://www.imkktv.com/',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
+    }
+
+    if cookies:
+        headers['cookie'] = cookies
+
+    pattern = r"(?:roomId|anchorId)=(.*?)(?=&|$)"
+    match = re.search(pattern, url)
+    room_id = match.group(1) if match else ''
+    play_api = f'https://api.imkktv.com/liveroom/getShareLiveVideo?roomId={room_id}'
+    json_str = await async_req(play_api, proxy_addr=proxy_addr, headers=headers)
+    json_data = json.loads(json_str)
+
+    room_data = json_data['data']
+    anchor_name = room_data['nickname']
+    live_status = room_data['playStatus'] == 0
+
+    result = {"anchor_name": anchor_name, "is_live": False}
+    if live_status:
+        flv_url = room_data['playUrl']
+        result |= {'is_live': True, 'flv_url': flv_url, 'record_url': flv_url}
+    return result
+
+
+@trace_error_decorator
+async def get_picarto_stream_url(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict:
+    headers = {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0',
+            'accept-language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
+        }
+
+    if cookies:
+        headers['cookie'] = cookies
+
+    anchor_id = url.split('?')[0].rsplit('/', maxsplit=1)[-1]
+    api = f'https://ptvintern.picarto.tv/api/channel/detail/{anchor_id}'
+
+    json_str = await async_req(api, proxy_addr=proxy_addr, headers=headers)
+    json_data = json.loads(json_str)
+
+    anchor_name = json_data['channel']['name']
+    live_status = json_data['channel']['online']
+
+    result = {"anchor_name": anchor_name, "is_live": live_status}
+    if live_status:
+        title = json_data['channel']['title']
+        m3u8_url = f"https://1-edge1-us-newyork.picarto.tv/stream/hls/golive+{anchor_name}/index.m3u8"
+        result |= {'is_live': True, 'title': title, 'm3u8_url': m3u8_url, 'record_url': m3u8_url}
     return result

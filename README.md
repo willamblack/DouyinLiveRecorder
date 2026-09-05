@@ -31,7 +31,7 @@
 - [x] 猫耳FM
 - [x] Look直播
 - [x] WinkTV
-- [x] FlexTV
+- [x] TTingLive(原Flextv)
 - [x] PopkonTV
 - [x] TwitCasting
 - [x] 百度直播
@@ -61,6 +61,10 @@
 - [x] 淘宝
 - [x] 京东
 - [x] Faceit
+- [x] 咪咕
+- [x] 连接直播
+- [x] 来秀直播
+- [x] Picarto
 - [ ] 更多平台正在更新中
 
 </div>
@@ -80,6 +84,7 @@
     	├── utils.py -> (contains utility functions)
     	├── logger.py -> (logger handdle)
     	├── room.py -> (get room info)
+    	├── ab_sign.py-> (generate dy token)
     	├── /javascript -> (some decrypt code)
     ├── main.py -> (main file)
     ├── ffmpeg_install.py -> (ffmpeg install script)
@@ -144,8 +149,7 @@ https://www.yy.com/22490906/22490906
 B站:
 https://live.bilibili.com/320
 
-小红书（推荐使用主页地址):
-https://www.xiaohongshu.com/user/profile/6330049c000000002303c7ed?appuid=5f3f478a00000000010005b3
+小红书（直播间分享地址):
 http://xhslink.com/xpJpfM
 
 bigo直播:
@@ -175,7 +179,7 @@ https://look.163.com/live?id=65108820&position=3
 WinkTV:
 https://www.winktv.co.kr/live/play/anjer1004
 
-FlexTV:
+FlexTV(TTinglive)::
 https://www.flextv.co.kr/channels/593127/live
 
 PopkonTV:
@@ -258,6 +262,7 @@ Youtube:
 https://www.youtube.com/watch?v=cS6zS5hi1w0
 
 淘宝(需cookie):
+https://tbzb.taobao.com/live?liveId=532359023188
 https://m.tb.cn/h.TWp0HTd
 
 京东:
@@ -265,12 +270,24 @@ https://3.cn/28MLBy-E
 
 Faceit:
 https://www.faceit.com/zh/players/Compl1/stream
+
+连接直播:
+https://show.lailianjie.com/10000258
+
+咪咕直播:
+https://www.miguvideo.com/p/live/120000541321
+
+来秀直播:
+https://www.imkktv.com/h5/share/video.html?uid=1845195&roomId=1710496
+
+Picarto:
+https://www.picarto.tv/cuteavalanche
 ```
 
 &emsp;
 
 ## 🎃源码运行
-使用源码运行，前提要有**Python>=3.10**环境，如果没有请先自行安装Python，再执行下面步骤。
+使用源码运行，可参考下面的步骤。
 
 1.首先拉取或手动下载本仓库项目代码
 
@@ -282,8 +299,93 @@ git clone https://github.com/ihmily/DouyinLiveRecorder.git
 
 ```bash
 cd DouyinLiveRecorder
-pip3 install -r requirements.txt
 ```
+
+> [!TIP]
+> - 不论你是否已安装 **Python>=3.10** 环境, 都推荐使用 [**uv**](https://github.com/astral-sh/uv) 运行, 因为它可以自动管理虚拟环境和方便地管理 **Python** 版本, **不过这完全是可选的**<br />
+> 使用以下命令安装
+>    ```bash
+>    # 在 macOS 和 Linux 上安装 uv
+>    curl -LsSf https://astral.sh/uv/install.sh | sh
+>    ```
+>    ```powershell
+>    # 在 Windows 上安装 uv
+>    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+>    ```
+> - 如果安装依赖速度太慢, 你可以考虑使用国内 pip 镜像源:<br />
+> 在 `pip` 命令使用 `-i` 参数指定, 如 `pip3 install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple`<br />
+> 或者在 `uv` 命令 `--index` 选项指定, 如 `uv sync --index https://pypi.tuna.tsinghua.edu.cn/simple`
+
+<details>
+
+  <summary>如果已安装 <b>Python>=3.10</b> 环境</summary>
+
+  - :white_check_mark: 在虚拟环境中安装 (推荐)
+  
+    1. 创建虚拟环境
+
+       - 使用系统已安装的 Python, 不使用 uv
+  
+         ```bash
+         python -m venv .venv
+         ```
+
+       - 使用 uv, 默认使用系统 Python, 你可以添加 `--python` 选项指定 Python 版本而不使用系统 Python [uv官方文档](https://docs.astral.sh/uv/concepts/python-versions/)
+       
+         ```bash
+         uv venv
+         ```
+    
+    2. 在终端激活虚拟环境 (在未安装 uv 或你想要手动激活虚拟环境时执行, 若已安装 uv, 可以跳过这一步, uv 会自动激活并使用虚拟环境)
+   
+       **Bash** 中
+       ```bash
+       source .venv/Scripts/activate
+       ```
+
+       **Powershell** 中
+       ```powershell
+       .venv\Scripts\activate.ps1
+       ```
+       
+       **Windows CMD** 中
+       ```bat
+       .venv\Scripts\activate.bat
+       ```
+
+    3. 安装依赖
+   
+       ```bash
+       # 使用 pip (若安装太慢或失败, 可使用 `-i` 指定镜像源)
+       pip3 install -U pip && pip3 install -r requirements.txt
+       # 或者使用 uv (可使用 `--index` 指定镜像源)
+       uv sync
+       # 或者
+       uv pip sync requirements.txt
+       ```
+
+  - :x: 在系统 Python 环境中安装 (不推荐)
+  
+    ```bash
+    pip3 install -U pip && pip3 install -r requirements.txt
+    ```
+
+</details>
+
+<details>
+
+  <summary>如果未安装 <b>Python>=3.10</b> 环境</summary>
+
+  你可以使用 [**uv**](https://github.com/astral-sh/uv) 安装依赖
+   
+  ```bash
+  # uv 将使用 3.10 及以上的最新 python 发行版自动创建并使用虚拟环境, 可使用 --python 选项指定 python 版本, 参见 https://docs.astral.sh/uv/reference/cli/#uv-sync--python 和 https://docs.astral.sh/uv/reference/cli/#uv-pip-sync--python
+  uv sync
+  # 或
+  uv pip sync requirements.txt
+  ```
+
+</details>
 
 3.安装[FFmpeg](https://ffmpeg.org/download.html#build-linux)，如果是Windows系统，这一步可跳过。对于Linux系统，执行以下命令安装
 
@@ -317,6 +419,12 @@ brew install ffmpeg
 
 ```python
 python main.py
+
+```
+或
+
+```bash
+uv run main.py
 ```
 
 其中Linux系统请使用`python3 main.py` 运行。
@@ -373,6 +481,13 @@ docker-compose stop
 
 &emsp;
 
+## 🤖相关项目
+
+- StreamCap: https://github.com/ihmily/StreamCap
+- streamget: https://github.com/ihmily/streamget
+
+&emsp;
+
 ## ❤️贡献者
 
 &ensp;&ensp; [![Hmily](https://github.com/ihmily.png?size=50)](https://github.com/ihmily)
@@ -392,10 +507,21 @@ docker-compose stop
 
 &ensp;&ensp; [![HoratioShaw](https://github.com/HoratioShaw.png?size=50)](https://github.com/HoratioShaw)
 [![nov30th](https://github.com/nov30th.png?size=50)](https://github.com/nov30th)
+[![727155455](https://github.com/727155455.png?size=50)](https://github.com/727155455)
+[![nixingshiguang](https://github.com/nixingshiguang.png?size=50)](https://github.com/nixingshiguang)
+[![1411430556](https://github.com/1411430556.png?size=50)](https://github.com/1411430556)
+[![Ovear](https://github.com/Ovear.png?size=50)](https://github.com/Ovear)
 &emsp;
 
 ## ⏳提交日志
 
+- 20251024
+  - 修复抖音风控无法获取数据问题
+  
+  - 新增soop.com录制支持
+  
+  - 修复bigo录制
+  
 - 20250127
   - 新增淘宝、京东、faceit直播录制
   - 修复小红书直播流录制以及转码问题
